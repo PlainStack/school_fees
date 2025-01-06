@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 import bcrypt
+import os
+from create_database import create_database
 
 # At the top of your app.py, add these configurations
 st.set_page_config(
@@ -263,7 +265,23 @@ def register_user():
         except sqlite3.IntegrityError:
             st.sidebar.error("Username already exists!")
 
+def ensure_database_exists():
+    """Ensure the database exists and has all required tables"""
+    try:
+        if not os.path.exists('school_fees.db'):
+            create_database()
+            st.success("Database created successfully!")
+        return True
+    except Exception as e:
+        st.error(f"Error creating database: {str(e)}")
+        return False
+
 def main():
+    # Ensure database exists before proceeding
+    if not ensure_database_exists():
+        st.error("Could not initialize database. Please contact support.")
+        return
+
     init_session_state()
     
     # Authentication sidebar
