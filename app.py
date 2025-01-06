@@ -4,9 +4,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+import bcrypt
+
+# At the top of your app.py, add these configurations
+st.set_page_config(
+    page_title="School Fees Calculator",
+    layout="wide",  # This makes the app use full width
+    initial_sidebar_state="expanded"
+)
 
 # Initialize connection to database
 @st.cache_resource
@@ -18,32 +26,45 @@ def init_connection():
         return d
     
     conn = sqlite3.connect('school_fees.db', check_same_thread=False)
-    conn.row_factory = dict_factory
+    conn.row_factory = sqlite3.Row  # Change to sqlite3.Row for better compatibility
     return conn
 
 def save_projection(conn, inputs, yearly_results):
     cursor = conn.cursor()
     
-    # Save main projection
-    cursor.execute("""
-        INSERT INTO projections (projection_date, seed_capital, investment_rate, contribution_escalation)
-        VALUES (?, ?, ?, ?)
-    """, (datetime.now().date(), inputs['seed_capital'], 
-          inputs['investment_rate'], inputs['contribution_escalation']))
-    
-    projection_id = cursor.lastrowid
-    
-    # Save yearly projections
-    for year, values in yearly_results.items():
+    try:
+        # Save main projection with user_id
         cursor.execute("""
-            INSERT INTO projected_values 
-            (projection_id, year, school_fees, monthly_contribution, annual_bonus, projected_balance)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (projection_id, year, values['school_fees'], 
-              values['monthly_contribution'], values['annual_bonus'], 
-              values['balance']))
-    
-    conn.commit()
+            INSERT INTO projections (
+                projection_date, seed_capital, investment_rate, 
+                contribution_escalation, user_id
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            datetime.now().date(), 
+            inputs['seed_capital'], 
+            inputs['investment_rate'], 
+            inputs['contribution_escalation'],
+            st.session_state.user_id
+        ))
+        
+        projection_id = cursor.lastrowid
+        
+        # Save yearly projections
+        for year, values in yearly_results.items():
+            cursor.execute("""
+                INSERT INTO projected_values 
+                (projection_id, year, school_fees, monthly_contribution, annual_bonus, projected_balance)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (projection_id, year, values['school_fees'], 
+                  values['monthly_contribution'], values['annual_bonus'], 
+                  values['balance']))
+        
+        conn.commit()
+        st.success("Projection saved successfully!")
+    except Exception as e:
+        st.error(f"Error saving projection: {str(e)}")
+        conn.rollback()
 
 def save_actual_values(conn, year, values):
     cursor = conn.cursor()
@@ -187,7 +208,79 @@ def create_projection_chart(yearly_results):
     
     return fig
 
+def init_session_state():
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hash_str: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hash_str.encode('utf-8'))
+
+def login_user():
+    st.sidebar.title("Login")
+    username = st.sidebar.text_input("Username")
+    password = st.sidebar.text_input("Password", type="password")
+    
+    if st.sidebar.button("Login"):
+        conn = init_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
+        user = cursor.fetchone()
+        
+        if user and verify_password(password, user['password_hash']):
+            st.session_state.user_id = user['id']
+            st.session_state.username = username
+            st.sidebar.success("Logged in successfully!")
+            st.rerun()
+        else:
+            st.sidebar.error("Invalid username or password")
+
+def register_user():
+    st.sidebar.title("Register")
+    new_username = st.sidebar.text_input("New Username")
+    new_password = st.sidebar.text_input("New Password", type="password")
+    confirm_password = st.sidebar.text_input("Confirm Password", type="password")
+    
+    if st.sidebar.button("Register"):
+        if new_password != confirm_password:
+            st.sidebar.error("Passwords don't match!")
+            return
+            
+        conn = init_connection()
+        cursor = conn.cursor()
+        try:
+            hashed_pw = hash_password(new_password)
+            cursor.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                (new_username, hashed_pw)
+            )
+            conn.commit()
+            st.sidebar.success("Registration successful! Please login.")
+        except sqlite3.IntegrityError:
+            st.sidebar.error("Username already exists!")
+
 def main():
+    init_session_state()
+    
+    # Authentication sidebar
+    if not st.session_state.user_id:
+        login_user()
+        st.sidebar.markdown("---")
+        register_user()
+        st.warning("Please login to use the calculator")
+        return
+
+    # Rest of your main app code...
+    st.sidebar.markdown(f"Welcome, {st.session_state.username}!")
+    if st.sidebar.button("Logout"):
+        st.session_state.user_id = None
+        st.session_state.username = None
+        st.rerun()
+
     st.title("School Fees Projection Calculator")
     
     conn = init_connection()
@@ -277,46 +370,99 @@ def main():
     with tab2:
         st.header("Historical Projections")
         
-        # Query historical projections
-        cursor = conn.cursor()
-        projections = pd.read_sql_query("""
-            SELECT id, projection_date, seed_capital, investment_rate, contribution_escalation
-            FROM projections
-            ORDER BY projection_date DESC
-        """, conn)
-        
-        if not projections.empty:
-            st.write("Select a projection to view:")
-            selected_projection = st.selectbox(
-                "Historical Projections",
-                projections['id'].tolist(),
-                format_func=lambda x: f"Projection {x} - {projections[projections['id']==x]['projection_date'].iloc[0]}"
-            )
+        try:
+            # Query historical projections for current user
+            projections = pd.read_sql_query("""
+                SELECT 
+                    p.id,
+                    p.projection_date,
+                    p.seed_capital,
+                    p.investment_rate,
+                    p.contribution_escalation,
+                    COUNT(pv.id) as value_count
+                FROM projections p
+                LEFT JOIN projected_values pv ON p.id = pv.projection_id
+                WHERE p.user_id = ?
+                GROUP BY p.id
+                ORDER BY p.projection_date DESC
+            """, conn, params=(st.session_state.user_id,))
             
-            if selected_projection:
-                projection_data = pd.read_sql_query("""
-                    SELECT year, school_fees, monthly_contribution, annual_bonus, projected_balance
-                    FROM projected_values
-                    WHERE projection_id = ?
-                    ORDER BY year
-                """, conn, params=(selected_projection,))
+            if projections.empty:
+                st.info("No historical projections found for your account.")
+            else:
+                st.write("Select a projection to view:")
                 
-                st.dataframe(projection_data)
+                # Format the selection box to show more details
+                def format_projection(proj_id):
+                    proj = projections[projections['id'] == proj_id].iloc[0]
+                    return (f"Projection {proj_id} - {proj['projection_date']} "
+                           f"(Seed: {proj['seed_capital']:,.2f}, Rate: {proj['investment_rate']*100:.1f}%)")
                 
-                # Create visualization
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=projection_data['year'],
-                    y=projection_data['projected_balance'],
-                    name='Projected Balance'
-                ))
-                fig.add_trace(go.Bar(
-                    x=projection_data['year'],
-                    y=projection_data['school_fees'],
-                    name='School Fees',
-                    opacity=0.6
-                ))
-                st.plotly_chart(fig)
+                selected_projection = st.selectbox(
+                    "Historical Projections",
+                    projections['id'].tolist(),
+                    format_func=format_projection
+                )
+                
+                if selected_projection:
+                    # Show projection details
+                    proj_details = projections[projections['id'] == selected_projection].iloc[0]
+                    st.write("Projection Details:")
+                    st.write(f"- Date: {proj_details['projection_date']}")
+                    st.write(f"- Seed Capital: R{proj_details['seed_capital']:,.2f}")
+                    st.write(f"- Investment Rate: {proj_details['investment_rate']*100:.1f}%")
+                    st.write(f"- Contribution Escalation: {proj_details['contribution_escalation']*100:.1f}%")
+                    
+                    # Get projection data
+                    projection_data = pd.read_sql_query("""
+                        SELECT 
+                            year,
+                            school_fees,
+                            monthly_contribution,
+                            annual_bonus,
+                            projected_balance
+                        FROM projected_values
+                        WHERE projection_id = ?
+                        ORDER BY year
+                    """, conn, params=(selected_projection,))
+                    
+                    if projection_data.empty:
+                        st.warning("No detailed data found for this projection.")
+                    else:
+                        # Format the dataframe for display
+                        display_df = projection_data.copy()
+                        for col in ['school_fees', 'monthly_contribution', 'annual_bonus', 'projected_balance']:
+                            display_df[col] = display_df[col].apply(lambda x: f"R{x:,.2f}")
+                        
+                        st.dataframe(display_df)
+                        
+                        # Create visualization
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=projection_data['year'],
+                            y=projection_data['projected_balance'],
+                            name='Projected Balance',
+                            line=dict(color='blue', width=2)
+                        ))
+                        fig.add_trace(go.Bar(
+                            x=projection_data['year'],
+                            y=projection_data['school_fees'],
+                            name='School Fees',
+                            marker_color='red',
+                            opacity=0.6
+                        ))
+                        
+                        fig.update_layout(
+                            title='Historical Projection: Balance vs School Fees',
+                            xaxis_title='Year',
+                            yaxis_title='Amount (R)',
+                            hovermode='x unified'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+        except Exception as e:
+            st.error(f"Error loading historical projections: {str(e)}")
     
     with tab3:
         st.header("Actual Values")

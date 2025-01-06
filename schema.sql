@@ -27,3 +27,13 @@ CREATE TABLE IF NOT EXISTS actual_values (
     actual_balance DECIMAL,
     recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Add user_id to projections table
+ALTER TABLE projections ADD COLUMN user_id INTEGER REFERENCES users(id);

@@ -44,6 +44,26 @@ def create_database():
     )
     ''')
 
+    # Create users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+
+    # Add user_id column to projections if it doesn't exist
+    cursor.execute('''
+    PRAGMA table_info(projections)
+    ''')
+    columns = cursor.fetchall()
+    if 'user_id' not in [col[1] for col in columns]:
+        cursor.execute('''
+        ALTER TABLE projections ADD COLUMN user_id INTEGER REFERENCES users(id)
+        ''')
+
     # Commit the changes and close the connection
     conn.commit()
     conn.close()
